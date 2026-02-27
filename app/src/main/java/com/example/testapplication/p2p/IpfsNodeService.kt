@@ -4,6 +4,9 @@ import android.util.Log
 import io.ipfs.cid.Cid
 import io.ipfs.multiaddr.MultiAddress
 import io.libp2p.core.PeerId
+import io.libp2p.core.multiformats.Multiaddr
+import io.libp2p.protocol.Ping
+import io.libp2p.protocol.PingController
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,6 +30,7 @@ import org.peergos.config.IdentitySection
 import org.peergos.protocol.dht.RamRecordStore
 import java.util.Optional
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -92,24 +96,39 @@ class IpfsNodeService(
     private fun startPingLoop() {
         if (!pingRunning.compareAndSet(false, true)) return
         pingJob = scope.launch {
+            var streamPromise: io.libp2p.core.StreamPromise<out PingController>? = null
+            var controller: PingController? = null
+
             while (isActive && pingRunning.get() && ipfs != null) {
                 try {
-                    val start = System.currentTimeMillis()
-                    val wants = listOf(Want(Cid.decode(TEST_CID)))
-                    val peers = setOf(peerId)
-                    Log.d(TAG, "ping: send want CID=$TEST_CID peer=${peerId.toBase58()}")
-                    ipfs!!.getBlocks(wants, peers, false)
-                    val elapsed = System.currentTimeMillis() - start
-                    _latencyMs.value = elapsed
+                    if (controller == null) {
+                        val host = ipfs!!.node
+                        val multiaddr = Multiaddr.fromString(nodeMultiaddress)
+                        Log.d(TAG, "ping: dial libp2p Ping to peer=${peerId.toBase58()}")
+                        val ping = Ping()
+                        streamPromise = ping.dial(host, multiaddr)
+                        controller = streamPromise.controller.get(PING_TIMEOUT_SEC, TimeUnit.SECONDS)
+                    }
+                    val rttMs = controller!!.ping().get(PING_TIMEOUT_SEC, TimeUnit.SECONDS)
+                    _latencyMs.value = rttMs
                     _lastError.value = null
-                    Log.d(TAG, "ping: ok latency=${elapsed}ms")
+                    Log.d(TAG, "ping: ok latency=${rttMs}ms (libp2p Ping)")
                 } catch (e: Exception) {
                     _latencyMs.value = null
-                    _lastError.value = "Ping: ${e.message}"
+                    val msg = when {
+                        e is RejectedExecutionException || e.cause is RejectedExecutionException ->
+                            "Ping: соединение закрыто"
+                        else -> "Ping: ${e.message}"
+                    }
+                    _lastError.value = msg
                     Log.w(TAG, "ping: fail peer=${peerId.toBase58()} error=${e.message}", e)
+                    streamPromise?.stream?.thenAccept { it.close() }
+                    streamPromise = null
+                    controller = null
                 }
                 delay(pingIntervalMs)
             }
+            streamPromise?.stream?.thenAccept { it.close() }
             pingRunning.set(false)
             Log.d(TAG, "ping: loop stopped")
         }
@@ -165,6 +184,7 @@ class IpfsNodeService(
         private const val FETCH_TIMEOUT_SEC = 30L
         private const val FETCH_TIMEOUT_MS = FETCH_TIMEOUT_SEC * 1000L
         private const val BOOTSTRAP_WAIT_MS = 5000L
+        private const val PING_TIMEOUT_SEC = 10L
     }
 }
 

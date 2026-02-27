@@ -27,7 +27,7 @@ class P2PViewModel(
         application.getString(R.string.error_timeout_request, FETCH_TIMEOUT_SEC)
     )
 
-    private val _cidInput = MutableStateFlow(application.getString(R.string.p2p_cid_placeholder))
+    private val _cidInput = MutableStateFlow(IpfsNodeService.TEST_CID)
     val cidInput: StateFlow<String> = _cidInput.asStateFlow()
 
     private val _blockResult = MutableStateFlow<String?>(null)

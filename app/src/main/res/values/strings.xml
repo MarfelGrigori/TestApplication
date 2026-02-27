@@ -10,7 +10,6 @@
     <string name="p2p_error_with_message">Ошибка: %1$s</string>
     <string name="p2p_latency_ms">Задержка (ping): %1$d мс</string>
     <string name="p2p_cid_label">CID</string>
-    <string name="p2p_cid_placeholder">QmTBimFzPPP2QsB7TQGc2dr4BZD4i7Gm2X1mNtb6DqN9Dr</string>
     <string name="p2p_button_fetch">Получить блок по CID</string>
     <string name="p2p_button_loading">Загрузка…</string>
 
