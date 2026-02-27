@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Test Application</string>
+
+    <!-- P2P screen -->
+    <string name="p2p_screen_title">P2P нода (CID / пинг)</string>
+    <string name="p2p_status_label">Статус</string>
+    <string name="p2p_status_connected">Подключено</string>
+    <string name="p2p_status_starting">Запуск…</string>
+    <string name="p2p_error_with_message">Ошибка: %1$s</string>
+    <string name="p2p_latency_ms">Задержка (ping): %1$d мс</string>
+    <string name="p2p_cid_label">CID</string>
+    <string name="p2p_cid_placeholder">QmTBimFzPPP2QsB7TQGc2dr4BZD4i7Gm2X1mNtb6DqN9Dr</string>
+    <string name="p2p_button_fetch">Получить блок по CID</string>
+    <string name="p2p_button_loading">Загрузка…</string>
+
+    <!-- Errors -->
+    <string name="error_start_failed">Ошибка запуска: %1$s</string>
+    <string name="error_fetch_failed">Ошибка: %1$s</string>
+    <string name="error_timeout_request">Таймаут запроса (%1$d с)</string>
+</resources>
