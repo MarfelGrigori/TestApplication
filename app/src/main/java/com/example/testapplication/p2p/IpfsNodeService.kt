@@ -4,6 +4,7 @@ import android.util.Log
 import io.ipfs.cid.Cid
 import io.ipfs.multiaddr.MultiAddress
 import io.libp2p.core.PeerId
+import io.libp2p.core.StreamPromise
 import io.libp2p.core.multiformats.Multiaddr
 import io.libp2p.protocol.Ping
 import io.libp2p.protocol.PingController
@@ -98,16 +99,20 @@ class IpfsNodeService(
     }
 
     private suspend fun doReconnect() = withContext(Dispatchers.IO) {
+        _isRunning.value = false
+        _latencyMs.value = null
+        _lastError.value = null
         Log.d(TAG, "ping: global reconnect — stopping node")
         try {
             ipfs?.stop()?.get(10, TimeUnit.SECONDS)
         } catch (_: Exception) { }
         ipfs = null
-        Log.d(TAG, "ping: global reconnect — building and starting new node")
+        Log.d(TAG, "ping: reconnect — building and starting new node")
         ipfs = buildAndStartIpfs()
-        Log.d(TAG, "ping: global reconnect — waiting ${BOOTSTRAP_WAIT_MS}ms for bootstrap")
+        Log.d(TAG, "ping: reconnect — waiting ${BOOTSTRAP_WAIT_MS}ms for bootstrap")
         delay(BOOTSTRAP_WAIT_MS)
-        Log.d(TAG, "ping: global reconnect done")
+        _isRunning.value = true
+        Log.d(TAG, "ping: reconnect done")
     }
 
     private fun startPingLoop() {
@@ -117,23 +122,30 @@ class IpfsNodeService(
             var controller: PingController? = null
             while (isActive && pingRunning.get() && ipfs != null) {
                 try {
-                    if (controller == null) {
-                        val host = ipfs!!.node
-                        val multiaddr = Multiaddr.fromString(nodeMultiaddress)
-                        val ping = Ping()
-                        streamPromise = ping.dial(host, multiaddr)
-                        controller = streamPromise.controller.get(PING_DIAL_TIMEOUT_SEC, TimeUnit.SECONDS)
-                        Log.d(TAG, "ping: connection opened (reuse, no close)")
+                    withTimeout(PING_ITERATION_TIMEOUT_MS) {
+                        if (controller == null) {
+                            val host = ipfs!!.node
+                            val multiaddr = Multiaddr.fromString(nodeMultiaddress)
+                            val ping = Ping()
+                            streamPromise = ping.dial(host, multiaddr)
+                            controller = streamPromise!!.controller.get(PING_DIAL_TIMEOUT_SEC, TimeUnit.SECONDS)
+                            Log.d(TAG, "ping: connection opened (reuse)")
+                        }
+                        val rttMs = controller!!.ping().get(PING_TIMEOUT_SEC, TimeUnit.SECONDS)
+                        _latencyMs.value = rttMs
+                        _lastError.value = null
+                        Log.d(TAG, "ping: ok latency=${rttMs}ms (libp2p Ping)")
                     }
-                    val rttMs = controller!!.ping().get(PING_TIMEOUT_SEC, TimeUnit.SECONDS)
-                    _latencyMs.value = rttMs
-                    _lastError.value = null
-                    Log.d(TAG, "ping: ok latency=${rttMs}ms (libp2p Ping)")
                 } catch (e: Exception) {
-                    val isRejected = e is RejectedExecutionException || e.cause is RejectedExecutionException
-                    Log.w(TAG, "ping: fail peer=${peerId.toBase58()} error=${e.message}", e)
+                    if (e is CancellationException) {
+                        Log.w(TAG, "ping: iteration timeout or cancelled")
+                    } else {
+                        Log.w(TAG, "ping: fail peer=${peerId.toBase58()} error=${e.message}", e)
+                    }
+                    closeStream(streamPromise)
                     streamPromise = null
                     controller = null
+                    val isRejected = e is RejectedExecutionException || e.cause is RejectedExecutionException
                     if (isRejected) {
                         runCatching { doReconnect() }.onFailure { Log.e(TAG, "ping: global reconnect failed", it) }
                     }
@@ -149,7 +161,7 @@ class IpfsNodeService(
         }
     }
 
-    private fun closeStream(streamPromise: io.libp2p.core.StreamPromise<out PingController>?) {
+    private fun closeStream(streamPromise: StreamPromise<out PingController>?) {
         if (streamPromise == null) return
         try {
             streamPromise.stream.get(2, TimeUnit.SECONDS).close()
@@ -209,6 +221,7 @@ class IpfsNodeService(
         private const val PING_DIAL_TIMEOUT_SEC = 30L
         private const val PING_TIMEOUT_SEC = 10L
         private const val PING_RETRY_DELAY_MS = 500L
+        private const val PING_ITERATION_TIMEOUT_MS = 15_000L
     }
 }
 
