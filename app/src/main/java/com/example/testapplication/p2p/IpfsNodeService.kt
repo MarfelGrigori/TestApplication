@@ -59,27 +59,7 @@ class IpfsNodeService(
         try {
             Log.d(TAG, "start: bootstrap=$nodeMultiaddress swarm=/ip4/0.0.0.0/tcp/0")
             _lastError.value = null
-            val swarmAddresses = listOf(MultiAddress("/ip4/0.0.0.0/tcp/0"))
-            val bootstrapAddresses = listOf(MultiAddress(nodeMultiaddress))
-            val authoriser = BlockRequestAuthoriser { _, _, _ ->
-                CompletableFuture.completedFuture(true)
-            }
-            val builder = HostBuilder().generateIdentity()
-            val identity = IdentitySection(builder.privateKey.bytes(), builder.peerId)
-            val records = RamRecordStore()
-            val blocks = RamBlockstore()
-            ipfs = EmbeddedIpfs.build(
-                records,
-                blocks,
-                false,
-                swarmAddresses,
-                bootstrapAddresses,
-                identity,
-                authoriser,
-                Optional.empty()
-            )
-            Log.d(TAG, "start: EmbeddedIpfs.build ok, calling start()")
-            ipfs!!.start()
+            ipfs = buildAndStartIpfs()
             Log.d(TAG, "start: waiting ${BOOTSTRAP_WAIT_MS}ms for bootstrap")
             delay(BOOTSTRAP_WAIT_MS)
             _isRunning.value = true
@@ -93,45 +73,87 @@ class IpfsNodeService(
         }
     }
 
+    private suspend fun buildAndStartIpfs(): EmbeddedIpfs = withContext(Dispatchers.IO) {
+        val swarmAddresses = listOf(MultiAddress("/ip4/0.0.0.0/tcp/0"))
+        val bootstrapAddresses = listOf(MultiAddress(nodeMultiaddress))
+        val authoriser = BlockRequestAuthoriser { _, _, _ ->
+            CompletableFuture.completedFuture(true)
+        }
+        val builder = HostBuilder().generateIdentity()
+        val identity = IdentitySection(builder.privateKey.bytes(), builder.peerId)
+        val records = RamRecordStore()
+        val blocks = RamBlockstore()
+        val node = EmbeddedIpfs.build(
+            records,
+            blocks,
+            false,
+            swarmAddresses,
+            bootstrapAddresses,
+            identity,
+            authoriser,
+            Optional.empty()
+        )
+        node.start()
+        node
+    }
+
+    private suspend fun doReconnect() = withContext(Dispatchers.IO) {
+        Log.d(TAG, "ping: global reconnect — stopping node")
+        try {
+            ipfs?.stop()?.get(10, TimeUnit.SECONDS)
+        } catch (_: Exception) { }
+        ipfs = null
+        Log.d(TAG, "ping: global reconnect — building and starting new node")
+        ipfs = buildAndStartIpfs()
+        Log.d(TAG, "ping: global reconnect — waiting ${BOOTSTRAP_WAIT_MS}ms for bootstrap")
+        delay(BOOTSTRAP_WAIT_MS)
+        Log.d(TAG, "ping: global reconnect done")
+    }
+
     private fun startPingLoop() {
         if (!pingRunning.compareAndSet(false, true)) return
         pingJob = scope.launch {
             var streamPromise: io.libp2p.core.StreamPromise<out PingController>? = null
             var controller: PingController? = null
-
             while (isActive && pingRunning.get() && ipfs != null) {
                 try {
                     if (controller == null) {
                         val host = ipfs!!.node
                         val multiaddr = Multiaddr.fromString(nodeMultiaddress)
-                        Log.d(TAG, "ping: dial libp2p Ping to peer=${peerId.toBase58()}")
                         val ping = Ping()
                         streamPromise = ping.dial(host, multiaddr)
-                        controller = streamPromise.controller.get(PING_TIMEOUT_SEC, TimeUnit.SECONDS)
+                        controller = streamPromise.controller.get(PING_DIAL_TIMEOUT_SEC, TimeUnit.SECONDS)
+                        Log.d(TAG, "ping: connection opened (reuse, no close)")
                     }
                     val rttMs = controller!!.ping().get(PING_TIMEOUT_SEC, TimeUnit.SECONDS)
                     _latencyMs.value = rttMs
                     _lastError.value = null
                     Log.d(TAG, "ping: ok latency=${rttMs}ms (libp2p Ping)")
                 } catch (e: Exception) {
-                    _latencyMs.value = null
-                    val msg = when {
-                        e is RejectedExecutionException || e.cause is RejectedExecutionException ->
-                            "Ping: соединение закрыто"
-                        else -> "Ping: ${e.message}"
-                    }
-                    _lastError.value = msg
+                    val isRejected = e is RejectedExecutionException || e.cause is RejectedExecutionException
                     Log.w(TAG, "ping: fail peer=${peerId.toBase58()} error=${e.message}", e)
-                    streamPromise?.stream?.thenAccept { it.close() }
                     streamPromise = null
                     controller = null
+                    if (isRejected) {
+                        runCatching { doReconnect() }.onFailure { Log.e(TAG, "ping: global reconnect failed", it) }
+                    }
+                    _lastError.value = null
+                    delay(PING_RETRY_DELAY_MS)
+                    continue
                 }
                 delay(pingIntervalMs)
             }
-            streamPromise?.stream?.thenAccept { it.close() }
+            closeStream(streamPromise)
             pingRunning.set(false)
             Log.d(TAG, "ping: loop stopped")
         }
+    }
+
+    private fun closeStream(streamPromise: io.libp2p.core.StreamPromise<out PingController>?) {
+        if (streamPromise == null) return
+        try {
+            streamPromise.stream.get(2, TimeUnit.SECONDS).close()
+        } catch (_: Exception) { }
     }
 
     suspend fun fetchBlock(cidStr: String): Result<String> = withContext(Dispatchers.IO) {
@@ -184,7 +206,9 @@ class IpfsNodeService(
         private const val FETCH_TIMEOUT_SEC = 30L
         private const val FETCH_TIMEOUT_MS = FETCH_TIMEOUT_SEC * 1000L
         private const val BOOTSTRAP_WAIT_MS = 5000L
+        private const val PING_DIAL_TIMEOUT_SEC = 30L
         private const val PING_TIMEOUT_SEC = 10L
+        private const val PING_RETRY_DELAY_MS = 500L
     }
 }
 
