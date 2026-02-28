@@ -118,7 +118,7 @@ class IpfsNodeService(
     private fun startPingLoop() {
         if (!pingRunning.compareAndSet(false, true)) return
         pingJob = scope.launch {
-            var streamPromise: io.libp2p.core.StreamPromise<out PingController>? = null
+            var streamPromise: StreamPromise<out PingController>? = null
             var controller: PingController? = null
             while (isActive && pingRunning.get() && ipfs != null) {
                 try {
@@ -189,7 +189,7 @@ class IpfsNodeService(
         } catch (e: CancellationException) {
             Log.w(TAG, "fetchBlock: timeout after ${FETCH_TIMEOUT_SEC}s cid=$cidStr")
             _lastError.value = timeoutMessage ?: "Таймаут запроса (${FETCH_TIMEOUT_SEC} с)"
-            Result.failure(RuntimeException(timeoutMessage ?: "Таймаут запроса ${FETCH_TIMEOUT_SEC} с", e))
+            Result.failure(RuntimeException(timeoutMessage ?: "Таймаут запроса $FETCH_TIMEOUT_SEC с", e))
         } catch (e: Exception) {
             Log.w(TAG, "fetchBlock: error cid=$cidStr", e)
             _lastError.value = e.message
