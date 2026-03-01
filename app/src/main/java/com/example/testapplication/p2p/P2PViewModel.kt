@@ -24,7 +24,8 @@ class P2PViewModel(
     private val service = IpfsNodeService(
         NODE_MULTIADDR,
         PING_INTERVAL_MS,
-        application.getString(R.string.error_timeout_request, FETCH_TIMEOUT_SEC)
+        application.getString(R.string.error_timeout_request, FETCH_TIMEOUT_SEC),
+        application.getString(R.string.error_no_connection)
     )
 
     private val _cidInput = MutableStateFlow(IpfsNodeService.TEST_CID)

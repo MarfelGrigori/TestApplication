@@ -38,7 +38,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 class IpfsNodeService(
     private val nodeMultiaddress: String,
     private val pingIntervalMs: Long = 2000L,
-    private val timeoutMessage: String? = null
+    private val timeoutMessage: String? = null,
+    private val connectionErrorMessage: String? = null
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var pingJob: Job? = null
@@ -60,16 +61,17 @@ class IpfsNodeService(
         try {
             Log.d(TAG, "start: bootstrap=$nodeMultiaddress swarm=/ip4/0.0.0.0/tcp/0")
             _lastError.value = null
+            _isRunning.value = false
             ipfs = buildAndStartIpfs()
             Log.d(TAG, "start: waiting ${BOOTSTRAP_WAIT_MS}ms for bootstrap")
             delay(BOOTSTRAP_WAIT_MS)
-            _isRunning.value = true
             startPingLoop()
-            Log.d(TAG, "start: success, peerId=${peerId.toBase58()}")
+            Log.d(TAG, "start: ping loop started, isRunning will be true after first successful ping")
             Result.success(Unit)
         } catch (e: Exception) {
             Log.e(TAG, "start: failed", e)
-            _lastError.value = e.message ?: "Start failed"
+            _isRunning.value = false
+            _lastError.value = e.message ?: connectionErrorMessage ?: "Start failed"
             Result.failure(e)
         }
     }
@@ -111,8 +113,7 @@ class IpfsNodeService(
         ipfs = buildAndStartIpfs()
         Log.d(TAG, "ping: reconnect — waiting ${BOOTSTRAP_WAIT_MS}ms for bootstrap")
         delay(BOOTSTRAP_WAIT_MS)
-        _isRunning.value = true
-        Log.d(TAG, "ping: reconnect done")
+        Log.d(TAG, "ping: reconnect done, isRunning will be true after next successful ping")
     }
 
     private fun startPingLoop() {
@@ -134,6 +135,7 @@ class IpfsNodeService(
                         val rttMs = controller!!.ping().get(PING_TIMEOUT_SEC, TimeUnit.SECONDS)
                         _latencyMs.value = rttMs
                         _lastError.value = null
+                        _isRunning.value = true
                         Log.d(TAG, "ping: ok latency=${rttMs}ms (libp2p Ping)")
                     }
                 } catch (e: Exception) {
@@ -142,6 +144,8 @@ class IpfsNodeService(
                     } else {
                         Log.w(TAG, "ping: fail peer=${peerId.toBase58()} error=${e.message}", e)
                     }
+                    _isRunning.value = false
+                    _lastError.value = connectionErrorMessage ?: (e.message ?: "Нет связи с узлом")
                     closeStream(streamPromise)
                     streamPromise = null
                     controller = null
@@ -149,7 +153,6 @@ class IpfsNodeService(
                     if (isRejected) {
                         runCatching { doReconnect() }.onFailure { Log.e(TAG, "ping: global reconnect failed", it) }
                     }
-                    _lastError.value = null
                     delay(PING_RETRY_DELAY_MS)
                     continue
                 }
@@ -170,9 +173,12 @@ class IpfsNodeService(
 
     suspend fun fetchBlock(cidStr: String): Result<String> = withContext(Dispatchers.IO) {
         Log.d(TAG, "fetchBlock: request cid=$cidStr peer=${peerId.toBase58()} timeout=${FETCH_TIMEOUT_SEC}s")
+        val ipfsNode = ipfs ?: run {
+            _lastError.value = connectionErrorMessage ?: "Узел не запущен"
+            return@withContext Result.failure(IllegalStateException("Node not started"))
+        }
         try {
             withTimeout(FETCH_TIMEOUT_MS) {
-                val ipfsNode = ipfs ?: throw IllegalStateException("Node not started")
                 val cid = Cid.decode(cidStr)
                 val wants = listOf(Want(cid))
                 val peers = setOf(peerId)
@@ -182,9 +188,7 @@ class IpfsNodeService(
                 if (blocks.isEmpty()) throw NoSuchElementException("Block not found: $cidStr")
                 val block: HashedBlock = blocks[0]
                 val raw = block.block.decodeToString()
-                val content = raw.stripDisplayText()
-                Log.d(TAG, "fetchBlock: success size=\"CID: ${block.hash}\\nSize: ${block.block.size} bytes\\n\\nContent (UTF-8):\\n$content\"")
-                content
+                raw.stripDisplayText()
             }.let { Result.success(it) }
         } catch (e: CancellationException) {
             Log.w(TAG, "fetchBlock: timeout after ${FETCH_TIMEOUT_SEC}s cid=$cidStr")
@@ -192,7 +196,7 @@ class IpfsNodeService(
             Result.failure(RuntimeException(timeoutMessage ?: "Таймаут запроса $FETCH_TIMEOUT_SEC с", e))
         } catch (e: Exception) {
             Log.w(TAG, "fetchBlock: error cid=$cidStr", e)
-            _lastError.value = e.message
+            _lastError.value = e.message ?: connectionErrorMessage
             Result.failure(e)
         }
     }
